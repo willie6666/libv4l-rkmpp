@@ -294,6 +294,18 @@ static void calculate_plane_sizes(const struct rkmpp_fmt *fmt,
 	}
 }
 
+static uint32_t calculate_format_size(const struct rkmpp_fmt *fmt,
+				      struct v4l2_pix_format_mplane *pix_fmt_mp)
+{
+	uint32_t sizeimage;
+	int i;
+
+	for (i = 0, sizeimage = 0; i < fmt->num_planes; ++i)
+		sizeimage += pix_fmt_mp->plane_fmt[i].sizeimage;
+
+	return sizeimage;
+}
+
 int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
 {
 	const struct rkmpp_fmt *fmt;
@@ -337,6 +349,7 @@ int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
 		*pix_fmt_mp = queue->format;
 	} else {
 		const struct rkmpp_fmt *codec_fmt;
+		uint32_t sizeimage;
 
 		if (ctx->is_decoder)
 			codec_fmt = ctx->output.rkmpp_format;
@@ -345,9 +358,21 @@ int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
 
 		pix_fmt_mp->num_planes = fmt->num_planes;
 
+		/* Round up to macroblocks. */
+		pix_fmt_mp->width = round_up(pix_fmt_mp->width, RKMPP_MB_DIM);
+		pix_fmt_mp->height = round_up(pix_fmt_mp->height, RKMPP_MB_DIM);
+
 		if (!codec_fmt) {
 			LOGE("the codec format isn't configured\n");
 		} else {
+			/* Special alignment for VP9. */
+			if (codec_fmt->fourcc == V4L2_PIX_FMT_VP9) {
+				pix_fmt_mp->width =
+					round_up(pix_fmt_mp->width, 256) | 256;
+				pix_fmt_mp->height =
+					round_up(pix_fmt_mp->height, 64);
+			}
+
 			/* Limit to hardware min/max. */
 			pix_fmt_mp->width = clamp(pix_fmt_mp->width,
 						  codec_fmt->frmsize.min_width,
@@ -357,12 +382,14 @@ int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
 						   codec_fmt->frmsize.max_height);
 		}
 
-		/* Round up to macroblocks. */
-		pix_fmt_mp->width = round_up(pix_fmt_mp->width, RKMPP_MB_DIM);
-		pix_fmt_mp->height = round_up(pix_fmt_mp->height, RKMPP_MB_DIM);
-
 		/* Fill in remaining fields. */
 		calculate_plane_sizes(fmt, pix_fmt_mp);
+
+		sizeimage = calculate_format_size(fmt, pix_fmt_mp);
+
+		LOGV(1, "calculated %dx%d:%d for %s format\n",
+		     pix_fmt_mp->width, pix_fmt_mp->height, sizeimage,
+		     codec_fmt ? codec_fmt->name : "unknown");
 	}
 
 	LEAVE();

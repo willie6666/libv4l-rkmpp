@@ -726,7 +726,7 @@ static int rkmpp_enc_streamon(struct rkmpp_enc_context *enc,
 		RETURN_ERR(errno, -1);
 	}
 
-	LOGV(1, "mpp initializing\n");
+	LOGV(1, "mpp initializing for %s\n", ctx->capture.rkmpp_format->name);
 
 	ret = mpp_create(&ctx->mpp, &ctx->mpi);
 	if (ret != MPP_OK) {

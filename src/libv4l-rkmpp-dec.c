@@ -550,7 +550,7 @@ static int rkmpp_dec_streamon(struct rkmpp_dec_context *dec,
 	if (ctx->mpp_streaming)
 		goto out;
 
-	LOGV(1, "mpp initializing\n");
+	LOGV(1, "mpp initializing for %s\n", ctx->output.rkmpp_format->name);
 
 	ret = mpp_create(&ctx->mpp, &ctx->mpi);
 	if (ret != MPP_OK) {
