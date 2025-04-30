@@ -191,6 +191,7 @@ int rkmpp_from_v4l2_buffer(struct rkmpp_context *ctx,
 	ENTER();
 
 	rkmpp_buffer->length = buffer->length;
+	rkmpp_buffer->bytesused = 0;
 
 	for (i = 0; i < buffer->length; i++) {
 		rkmpp_buffer->planes[i].length = buffer->m.planes[i].length;
