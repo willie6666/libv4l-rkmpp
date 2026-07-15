@@ -4,11 +4,39 @@ A V4L2 plugin that wraps [rockchip-mpp](http://opensource.rock-chips.com/wiki_Mp
 
 The original idea comes from [v4l-gst](https://github.com/igel-oss/v4l-gst).
 
+## About this fork
+
+This fork of [JeffyCN/libv4l-rkmpp](https://github.com/JeffyCN/libv4l-rkmpp) adds **10bit video decoding support** (e.g. HEVC Main10 and VP9 Profile 2), with the decoded frames down-converted to 8bit NV12 for display.
+
+### Background
+
+The upstream plugin only outputs 8bit NV12. When a 10bit stream is decoded, MPP reports `MPP_FMT_YUV420SP_10BIT` (NV15) at the info-change stage, which trips an assert in `rkmpp_apply_info_change()` and kills the caller (in chromium, the whole GPU process — and after three such crashes chromium disables hardware video decoding entirely until restarted).
+
+The RKVDEC hardware cannot dither 10bit streams down to 8bit by itself: on RK3588, `MPP_DEC_SET_OUTPUT_FORMAT` has no effect and the decoder always produces NV15 for 10bit content.
+
+### How it works
+
+When an info change reports a 10bit format, the plugin now:
+
+1. Detaches the capture buffers from MPP (`MPP_DEC_SET_EXT_BUF_GROUP(NULL)`), letting MPP decode into its own internal NV15 buffers.
+2. Still reports NV12 to the client, with the horizontal stride aligned to 64 pixels.
+3. For every decoded frame, grabs an unused NV12 capture buffer and converts the NV15 frame into it using the RGA hardware (librga's `imcvtcolor`), so the conversion costs no CPU time (~4ms per 4K frame on RK3588, fast enough for 4K60).
+
+8bit streams are unaffected and keep the original zero-copy path, where MPP decodes directly into the capture buffers.
+
+Note: since the output is 8bit NV12, HDR content is displayed without tone mapping (the extra 2 bits are simply dropped by RGA).
+
+### Requirements
+
+* A SoC whose RGA supports NV15 input (e.g. RK3588/RK3588S with RGA3).
+* [librga](https://github.com/airockchip/librga) (see Dependencies below).
+
 ## Dependencies
 
 * [v4l-utils](https://git.linuxtv.org/v4l-utils.git) - with this patch:  
   [0001-libv4l2-Support-mmap-to-libv4l-plugin.patch](https://github.com/JeffyCN/meta-rockchip/blob/release-1.3.0_20200915/recipes-multimedia/v4l2apps/v4l-utils/0001-libv4l2-Support-mmap-to-libv4l-plugin.patch)
 * [rockchip-mpp](https://github.com/rockchip-linux/mpp)
+* [librga](https://github.com/airockchip/librga) - for converting 10bit frames(NV15) into NV12
 
 ## Building
 
