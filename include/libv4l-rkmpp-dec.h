@@ -61,6 +61,9 @@ struct rkmpp_video_info {
  * @video_info:		Video information.
  * @event_subscribed:	V4L2 event subscribed.
  * @pending_eos:	Has pending EOS to return.
+ * @conv_10bit:		Convert 10bit frames(NV15) into NV12 using RGA.
+ * @conv_hstride:	Horizontal stride of converted NV12 frames.
+ * @conv_size:		Size of converted NV12 frames.
  */
 struct rkmpp_dec_context {
 	struct rkmpp_context *ctx;
@@ -69,6 +72,10 @@ struct rkmpp_dec_context {
 	bool event_subscribed;
 
 	bool pending_eos;
+
+	bool conv_10bit;
+	uint32_t conv_hstride;
+	uint32_t conv_size;
 };
 
 bool rkmpp_dec_has_event(void *data);

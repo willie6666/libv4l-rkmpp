@@ -6,6 +6,7 @@ Build-Depends: debhelper (>= 9),
                ninja-build,
                pkg-config,
                librockchip-mpp-dev,
+               librga-dev,
                libv4l-dev
 Standards-Version: 3.9.8
 Section: libs

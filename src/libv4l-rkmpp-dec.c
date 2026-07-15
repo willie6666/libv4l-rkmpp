@@ -14,6 +14,9 @@
 
 #include <signal.h>
 
+#include <rga/rga.h>
+#include <rga/im2d.h>
+
 #include "libv4l-rkmpp-dec.h"
 
 #define RKMPP_DEC_POLL_TIMEOUT_MS	500
@@ -254,13 +257,34 @@ static void rkmpp_apply_info_change(struct rkmpp_dec_context *dec,
 	memcpy((void *)&video_info,
 	       (void *)&dec->video_info, sizeof(video_info));
 
-	video_info.mpp_format = mpp_frame_get_fmt(frame);
+	video_info.mpp_format = mpp_frame_get_fmt(frame) & MPP_FRAME_FMT_MASK;
 	video_info.width = mpp_frame_get_width(frame);
 	video_info.height = mpp_frame_get_height(frame);
 	video_info.hor_stride = mpp_frame_get_hor_stride(frame);
 	video_info.ver_stride = mpp_frame_get_ver_stride(frame);
 	video_info.size = mpp_frame_get_buf_size(frame);
 	video_info.valid = true;
+
+	assert(video_info.mpp_format == MPP_FMT_YUV420SP ||
+	       video_info.mpp_format == MPP_FMT_YUV420SP_10BIT);
+
+	/*
+	 * The decoder cannot output 8bit NV12 for 10bit videos. Let mpp
+	 * decode into its own internal buffers(NV15) and convert them
+	 * into the NV12 capture buffers using RGA.
+	 *
+	 * This needs to be re-applied on every info change, since the mpp
+	 * instance might have been re-created after streamoff.
+	 */
+	dec->conv_10bit = video_info.mpp_format == MPP_FMT_YUV420SP_10BIT;
+	ctx->mpi->control(ctx->mpp, MPP_DEC_SET_EXT_BUF_GROUP,
+			  dec->conv_10bit ? NULL : ctx->capture.external_group);
+
+	if (dec->conv_10bit) {
+		dec->conv_hstride = round_up(video_info.width, 64);
+		dec->conv_size = dec->conv_hstride *
+			video_info.ver_stride * 3 / 2;
+	}
 
 	if (!memcmp((void *)&video_info,
 		    (void *)&dec->video_info, sizeof(video_info))) {
@@ -287,17 +311,59 @@ static void rkmpp_apply_info_change(struct rkmpp_dec_context *dec,
 	 * in g_selection.
 	 */
 	ctx->capture.format.num_planes = 1;
-	ctx->capture.format.width = dec->video_info.hor_stride;
-	ctx->capture.format.height = dec->video_info.ver_stride;
-	ctx->capture.format.plane_fmt[0].bytesperline =
-		dec->video_info.hor_stride;
-	ctx->capture.format.plane_fmt[0].sizeimage =
-		dec->video_info.size;
+	if (dec->conv_10bit) {
+		/* The capture buffers only hold the converted NV12 frames */
+		ctx->capture.format.width = dec->conv_hstride;
+		ctx->capture.format.height = dec->video_info.ver_stride;
+		ctx->capture.format.plane_fmt[0].bytesperline =
+			dec->conv_hstride;
+		ctx->capture.format.plane_fmt[0].sizeimage =
+			dec->conv_size;
+	} else {
+		ctx->capture.format.width = dec->video_info.hor_stride;
+		ctx->capture.format.height = dec->video_info.ver_stride;
+		ctx->capture.format.plane_fmt[0].bytesperline =
+			dec->video_info.hor_stride;
+		ctx->capture.format.plane_fmt[0].sizeimage =
+			dec->video_info.size;
+	}
 
-	assert(dec->video_info.mpp_format == MPP_FMT_YUV420SP);
 	ctx->capture.format.pixelformat = V4L2_PIX_FMT_NV12;
 
 	LEAVE();
+}
+
+/* Convert a 10bit frame(NV15) into a NV12 capture buffer using RGA */
+static int rkmpp_convert_frame(struct rkmpp_dec_context *dec,
+			       MppFrame frame,
+			       struct rkmpp_buffer *rkmpp_buffer)
+{
+	MppBuffer buffer = mpp_frame_get_buffer(frame);
+	rga_buffer_t src, dst;
+	IM_STATUS ret;
+
+	/* The RGA expects NV15's wstride in bytes */
+	src = wrapbuffer_fd_t(mpp_buffer_get_fd(buffer),
+			      dec->video_info.width,
+			      dec->video_info.height,
+			      dec->video_info.hor_stride,
+			      dec->video_info.ver_stride,
+			      RK_FORMAT_YCbCr_420_SP_10B);
+	dst = wrapbuffer_fd_t(rkmpp_buffer->fd,
+			      dec->video_info.width,
+			      dec->video_info.height,
+			      dec->conv_hstride,
+			      dec->video_info.ver_stride,
+			      RK_FORMAT_YCbCr_420_SP);
+
+	ret = imcvtcolor_t(src, dst, src.format, dst.format,
+			   IM_COLOR_SPACE_DEFAULT, 1);
+	if (ret != IM_STATUS_SUCCESS) {
+		LOGE("failed to convert 10bit frame: %s\n", imStrError(ret));
+		return -1;
+	}
+
+	return 0;
 }
 
 /* Feed available packets and frames to mpp */
@@ -383,6 +449,49 @@ static void *decoder_thread_fn(void *data)
 			goto next_locked;
 		}
 
+		if (dec->conv_10bit) {
+			MppBuffer dst_buffer = NULL;
+
+			/* Wait for an unused capture buffer to convert into */
+			while (ctx->mpp_streaming && ctx->capture.streaming) {
+				ret = mpp_buffer_get(ctx->capture.external_group,
+						     &dst_buffer,
+						     dec->conv_size);
+				if (ret == MPP_OK)
+					break;
+
+				/* Unlock it to allow returning buffers */
+				pthread_mutex_unlock(&ctx->ioctl_mutex);
+				usleep(1000);
+				pthread_mutex_lock(&ctx->ioctl_mutex);
+			}
+
+			if (!dst_buffer)
+				goto next_locked;
+
+			index = mpp_buffer_get_index(dst_buffer);
+			rkmpp_buffer = &ctx->capture.buffers[index];
+
+			rkmpp_buffer->timestamp = mpp_frame_get_pts(frame);
+			rkmpp_buffer_set_locked(rkmpp_buffer);
+
+			if (mpp_frame_get_errinfo(frame) ||
+			    mpp_frame_get_discard(frame)) {
+				LOGE("frame err or discard\n");
+				rkmpp_buffer->bytesused = 0;
+				rkmpp_buffer_set_error(rkmpp_buffer);
+			} else if (rkmpp_convert_frame(dec, frame,
+						       rkmpp_buffer) < 0) {
+				rkmpp_buffer->bytesused = 0;
+				rkmpp_buffer_set_error(rkmpp_buffer);
+			} else {
+				/* Size of NV12 image */
+				rkmpp_buffer->bytesused = dec->conv_size;
+			}
+
+			goto out_frame;
+		}
+
 		mpp_buffer_inc_ref(buffer);
 
 		index = mpp_buffer_get_index(buffer);
@@ -401,6 +510,7 @@ static void *decoder_thread_fn(void *data)
 			rkmpp_buffer->bytesused = dec->video_info.hor_stride *
 				dec->video_info.ver_stride * 3 / 2;
 		}
+out_frame:
 
 		LOGV(2, "return frame: %d(%" PRIu64 ")\n",
 		     index, rkmpp_buffer->timestamp);

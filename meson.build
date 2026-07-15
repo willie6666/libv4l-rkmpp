@@ -9,6 +9,7 @@ project(
 libthreads_dep = dependency('threads')
 libv4l_dep = dependency('libv4l2')
 mpp_dep = dependency('rockchip_mpp')
+rga_dep = dependency('librga')
 
 cdata = configuration_data()
 
@@ -27,6 +28,7 @@ deps = [
   libthreads_dep,
   libv4l_dep,
   mpp_dep,
+  rga_dep,
 ]
 
 srcs = [
